@@ -19,7 +19,7 @@ You enable Redis storage with Caddy by setting the storage module used, for exam
 	//all value is optional, here is the default
     storage redis {
         write_address "127.0.0.1:6379"
-				read_address  "127.0.0.1:6379"
+        read_address  "127.0.0.1:6379"
         username      ""
         password      ""
         db            1
