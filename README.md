@@ -11,14 +11,15 @@ for it's locking mechanism. See [distlock](https://redis.io/topics/distlock) for
 This plugin currently work with versions of Caddy v2, for the previous version of Caddy use [caddy-v1](https://github.com/gamalan/caddy-tlsredis/tree/caddy-v1) branch.
 
 ## Configuration
+
 You enable Redis storage with Caddy by setting the storage module used, for example
+
 ```
 {
 	//all value is optional, here is the default
     storage redis {
-        host          "127.0.0.1"
-        port          6379
-        address       "127.0.0.1:6379" // no default, but is build from host+":"+port, if set, then host and port is ignored
+        write_address "127.0.0.1:6379"
+				read_address  "127.0.0.1:6379"
         username      ""
         password      ""
         db            1
@@ -38,6 +39,7 @@ You enable Redis storage with Caddy by setting the storage module used, for exam
 ```
 
 JSON example
+
 ```
 {
     "admin": {
@@ -47,11 +49,9 @@ JSON example
         "address": "redis:6379",
         "aes_key": "redistls-01234567890-caddytls-32",
         "db": 1,
-        "host": "redis",
         "key_prefix": "caddytls",
         "module": "redis",
         "password": "",
-        "port": "6379",
         "timeout": 5,
         "tls_enabled": false,
         "tls_insecure": true,
@@ -59,7 +59,9 @@ JSON example
     }
 }
 ```
+
 There are additional environment variable for this plugin:
+
 - `CADDY_CLUSTERING_REDIS_HOST` defines Redis Host, default is `127.0.0.1`
 - `CADDY_CLUSTERING_REDIS_PORT` defines Redis Port, default is 6379
 - `CADDY_CLUSTERING_REDIS_USERNAME` defines Redis username, default is empty
@@ -75,8 +77,3 @@ There are additional environment variable for this plugin:
 ## TODO
 
 - Add Redis Cluster or Sentinel support (probably need to update the distlock implementation first)
-
-
-
-
-

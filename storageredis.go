@@ -51,11 +51,11 @@ const (
 	// DefaultValuePrefix sets a prefix to KV values to check validation
 	DefaultValuePrefix = "caddy-storage-redis"
 
-	// DefaultRedisHost define the Redis instance host
-	DefaultRedisHost = "127.0.0.1"
+	// DefaultRedisHost define the Redis instance write address
+	DefaultRedisWriteAddress = "127.0.0.1:6379"
 
-	// DefaultRedisPort define the Redis instance port
-	DefaultRedisPort = "6379"
+	// DefaultRedisHost define the Redis instance read address
+	DefaultRedisReadAddress = "127.0.0.1:6379"
 
 	// DefaultRedisDB define the Redis DB number
 	DefaultRedisDB = 0
@@ -75,13 +75,11 @@ const (
 	// DefaultRedisTLSInsecure define the Redis TLS connection
 	DefaultRedisTLSInsecure = true
 
-	// Environment Name
+	// EnvNameWriteAddress defines the env variable name for the Redis write address
+	EnvNameWriteAddress = "CADDY_CLUSTERING_WRITE_ADDRESS"
 
-	// EnvNameRedisHost defines the env variable name to override Redis host
-	EnvNameRedisHost = "CADDY_CLUSTERING_REDIS_HOST"
-
-	// EnvNameRedisPort defines the env variable name to override Redis port
-	EnvNameRedisPort = "CADDY_CLUSTERING_REDIS_PORT"
+	// EnvNameReadAddress defines the env variable name for the Redis read address
+	EnvNameReadAddress = "CADDY_CLUSTERING_READ_ADDRESS"
 
 	// EnvNameRedisDB defines the env variable name to override Redis db number
 	EnvNameRedisDB = "CADDY_CLUSTERING_REDIS_DB"
@@ -113,23 +111,23 @@ const (
 
 // RedisStorage contain Redis client, and plugin option
 type RedisStorage struct {
-	Client       *redis.Client
+	WriteClient  *redis.Client
+	ReadClient   *redis.Client
 	ClientLocker *redislock.Client
 	Logger       *zap.SugaredLogger
 	ctx          context.Context
 
-	Address     string `json:"address"`
-	Host        string `json:"host"`
-	Port        string `json:"port"`
-	DB          int    `json:"db"`
-	Username    string `json:"username"`
-	Password    string `json:"password"`
-	Timeout     int    `json:"timeout"`
-	KeyPrefix   string `json:"key_prefix"`
-	ValuePrefix string `json:"value_prefix"`
-	AesKey      string `json:"aes_key"`
-	TlsEnabled  bool   `json:"tls_enabled"`
-	TlsInsecure bool   `json:"tls_insecure"`
+	WriteAddress string `json:"write_address"`
+	ReadAddress  string `json:"read_address"`
+	DB           int    `json:"db"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	Timeout      int    `json:"timeout"`
+	KeyPrefix    string `json:"key_prefix"`
+	ValuePrefix  string `json:"value_prefix"`
+	AesKey       string `json:"aes_key"`
+	TlsEnabled   bool   `json:"tls_enabled"`
+	TlsInsecure  bool   `json:"tls_insecure"`
 
 	locks *sync.Map
 }
@@ -169,26 +167,23 @@ func (rd *RedisStorage) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 		}
 
 		switch key {
-		case "address":
+		case "write_address":
 			if value != "" {
 				parsedAddress, err := caddy.ParseNetworkAddress(value)
 				if err == nil {
-					rd.Address = parsedAddress.JoinHostPort(0)
+					rd.WriteAddress = parsedAddress.JoinHostPort(0)
 				} else {
-					rd.Address = ""
+					rd.WriteAddress = DefaultRedisWriteAddress
 				}
 			}
-		case "host":
+		case "read_address":
 			if value != "" {
-				rd.Host = value
-			} else {
-				rd.Host = DefaultRedisHost
-			}
-		case "port":
-			if value != "" {
-				rd.Port = value
-			} else {
-				rd.Port = DefaultRedisPort
+				parsedAddress, err := caddy.ParseNetworkAddress(value)
+				if err == nil {
+					rd.ReadAddress = parsedAddress.JoinHostPort(0)
+				} else {
+					rd.ReadAddress = DefaultRedisReadAddress
+				}
 			}
 		case "db":
 			if value != "" {
@@ -272,7 +267,8 @@ func (rd *RedisStorage) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 func (rd *RedisStorage) Provision(ctx caddy.Context) error {
 	rd.Logger = ctx.Logger(rd).Sugar()
 	rd.GetConfigValue()
-	rd.Logger.Info("TLS Storage are using Redis, on " + rd.Address)
+	rd.Logger.Info("TLS Storage are using Redis, on (write) " + rd.WriteAddress)
+	rd.Logger.Info("TLS Storage are using Redis, on (read) " + rd.ReadAddress)
 	if err := rd.BuildRedisClient(); err != nil {
 		return err
 	}
@@ -285,8 +281,6 @@ func (rd *RedisStorage) GetConfigValue() {
 	defer logger.Sync() // flushes buffer, if any
 	rd.Logger = logger.Sugar()
 	rd.Logger.Debugf("GetConfigValue [%s]:%s", "pre", rd)
-	rd.Host = configureString(rd.Host, EnvNameRedisHost, DefaultRedisHost)
-	rd.Port = configureString(rd.Port, EnvNameRedisPort, DefaultRedisPort)
 	rd.DB = configureInt(rd.DB, EnvNameRedisDB, DefaultRedisDB)
 	rd.Timeout = configureInt(rd.Timeout, EnvNameRedisTimeout, DefaultRedisTimeout)
 	rd.Username = configureString(rd.Username, EnvNameRedisUsername, DefaultRedisUsername)
@@ -296,7 +290,8 @@ func (rd *RedisStorage) GetConfigValue() {
 	rd.KeyPrefix = configureString(rd.KeyPrefix, EnvNameKeyPrefix, DefaultKeyPrefix)
 	rd.ValuePrefix = configureString(rd.ValuePrefix, EnvNameValuePrefix, DefaultValuePrefix)
 	rd.AesKey = configureString(rd.AesKey, EnvNameAESKey, DefaultAESKey)
-	rd.Address = configureString(rd.Address, "", rd.Host+":"+rd.Port)
+	rd.WriteAddress = configureString(rd.WriteAddress, EnvNameWriteAddress, DefaultRedisWriteAddress)
+	rd.ReadAddress = configureString(rd.ReadAddress, EnvNameReadAddress, DefaultRedisReadAddress)
 	rd.Logger.Debugf("GetConfigValue [%s]:%s", "post", rd)
 }
 
@@ -308,8 +303,17 @@ func (rd *RedisStorage) prefixKey(key string) string {
 // GetRedisStorage build RedisStorage with it's client
 func (rd *RedisStorage) BuildRedisClient() error {
 	rd.ctx = context.Background()
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:         rd.Address,
+	wRedisClient := redis.NewClient(&redis.Options{
+		Addr:         rd.WriteAddress,
+		Username:     rd.Username,
+		Password:     rd.Password,
+		DB:           rd.DB,
+		DialTimeout:  time.Second * time.Duration(rd.Timeout),
+		ReadTimeout:  time.Second * time.Duration(rd.Timeout),
+		WriteTimeout: time.Second * time.Duration(rd.Timeout),
+	})
+	rRedisClient := redis.NewClient(&redis.Options{
+		Addr:         rd.ReadAddress,
 		Username:     rd.Username,
 		Password:     rd.Password,
 		DB:           rd.DB,
@@ -319,18 +323,22 @@ func (rd *RedisStorage) BuildRedisClient() error {
 	})
 
 	if rd.TlsEnabled {
-		redisClient.Options().TLSConfig = &tls.Config{
+		wRedisClient.Options().TLSConfig = &tls.Config{
+			InsecureSkipVerify: rd.TlsInsecure,
+		}
+		rRedisClient.Options().TLSConfig = &tls.Config{
 			InsecureSkipVerify: rd.TlsInsecure,
 		}
 	}
 
-	_, err := redisClient.Ping(rd.ctx).Result()
+	_, err := wRedisClient.Ping(rd.ctx).Result()
 	if err != nil {
 		return err
 	}
 
-	rd.Client = redisClient
-	rd.ClientLocker = redislock.New(rd.Client)
+	rd.WriteClient = wRedisClient
+	rd.ReadClient = rRedisClient
+	rd.ClientLocker = redislock.New(rd.WriteClient)
 	rd.locks = &sync.Map{}
 	return nil
 }
@@ -347,7 +355,7 @@ func (rd RedisStorage) Store(key string, value []byte) error {
 		return fmt.Errorf("unable to encode data for %v: %v", key, err)
 	}
 
-	if err := rd.Client.Set(rd.ctx, rd.prefixKey(key), encryptedValue, 0).Err(); err != nil {
+	if err := rd.WriteClient.Set(rd.ctx, rd.prefixKey(key), encryptedValue, 0).Err(); err != nil {
 		return fmt.Errorf("unable to store data for %v: %v", key, err)
 	}
 
@@ -373,7 +381,7 @@ func (rd RedisStorage) Delete(key string) error {
 		return err
 	}
 
-	if err := rd.Client.Del(rd.ctx, rd.prefixKey(key)).Err(); err != nil {
+	if err := rd.WriteClient.Del(rd.ctx, rd.prefixKey(key)).Err(); err != nil {
 		return fmt.Errorf("unable to delete data for key %s: %v", key, err)
 	}
 
@@ -383,10 +391,7 @@ func (rd RedisStorage) Delete(key string) error {
 // Exists returns true if the key exists
 func (rd RedisStorage) Exists(key string) bool {
 	_, err := rd.getData(key)
-	if err == nil {
-		return true
-	}
-	return false
+	return err == nil
 }
 
 // List returns all keys that match prefix.
@@ -407,7 +412,7 @@ func (rd RedisStorage) List(prefix string, recursive bool) ([]string, error) {
 	}
 
 	// first SCAN command
-	keys, pointer, err := rd.Client.Scan(rd.ctx, pointer, search, ScanCount).Result()
+	keys, pointer, err := rd.ReadClient.Scan(rd.ctx, pointer, search, ScanCount).Result()
 	if err != nil {
 		return keysFound, err
 	}
@@ -415,7 +420,7 @@ func (rd RedisStorage) List(prefix string, recursive bool) ([]string, error) {
 	tempKeys = append(tempKeys, keys...)
 	// because SCAN command doesn't always return all possible, keep searching until pointer is equal to the firstPointer
 	for pointer != firstPointer {
-		keys, nextPointer, _ := rd.Client.Scan(rd.ctx, pointer, search, ScanCount).Result()
+		keys, nextPointer, _ := rd.ReadClient.Scan(rd.ctx, pointer, search, ScanCount).Result()
 		tempKeys = append(tempKeys, keys...)
 		pointer = nextPointer
 	}
@@ -472,7 +477,7 @@ func (rd RedisStorage) Stat(key string) (certmagic.KeyInfo, error) {
 
 // getData return data from redis by key as it is
 func (rd RedisStorage) getData(key string) ([]byte, error) {
-	data, err := rd.Client.Get(rd.ctx, rd.prefixKey(key)).Bytes()
+	data, err := rd.ReadClient.Get(rd.ctx, rd.prefixKey(key)).Bytes()
 
 	if err != nil {
 		return nil, fmt.Errorf("unable to obtain data for %s: %v", key, err)
@@ -522,8 +527,6 @@ func (rd *RedisStorage) Lock(ctx context.Context, key string) error {
 			return ctx.Err()
 		}
 	}
-
-	return nil
 }
 
 func (rd *RedisStorage) obtainLock(key string) (*redislock.Lock, error) {
